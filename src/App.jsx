@@ -3,7 +3,7 @@ import {
   Bot, Send, Settings, Play, Check, ChevronDown, ArrowLeft, Sparkles,
   BarChart2, List, MessageSquare, Bookmark, Trash2, Clock, X, Plus,
   Search, Maximize2, Trophy, FileText, Zap, Bike, Dumbbell,
-  ToggleLeft, ToggleRight, Minus
+  ToggleLeft, ToggleRight, Minus, TrendingUp
 } from 'lucide-react';
 
 // ─── EXERCISE DB ───
@@ -33,15 +33,22 @@ const parseReps = (v) => { if (!v) return 0; const n = parseFloat(v); return isN
 
 const getExStats = (name, hist) => {
   if (!hist?.length) return null;
-  let maxW = 0, lastDate = null, lastSets = [];
+  let maxW = 0, max1RM = 0, lastDate = null, lastSets = [];
   for (const s of hist) {
     const ed = s.exercises?.find(e => e.name === name);
     if (ed) {
       if (!lastDate) { lastDate = s.date; lastSets = ed.setsData || []; }
-      for (const set of (ed.setsData || [])) { if (set.completed && set.weight) { const w = parseFloat(set.weight); if (w > maxW) maxW = w; } }
+      for (const set of (ed.setsData || [])) {
+        if (set.completed && set.weight) {
+          const w = parseFloat(set.weight);
+          if (w > maxW) maxW = w;
+          const e1rm = calc1RM(set.weight, set.reps);
+          if (e1rm > max1RM) max1RM = e1rm;
+        }
+      }
     }
   }
-  return (maxW === 0 && !lastDate) ? null : { maxW, lastDate, lastSets };
+  return (maxW === 0 && !lastDate) ? null : { maxW, max1RM, lastDate, lastSets };
 };
 
 // ─── AI ───
@@ -88,7 +95,12 @@ const callAI = async (messages, settings) => {
     const to = setTimeout(() => ctrl.abort(), 60000);
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': import.meta.env.VITE_ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
@@ -247,34 +259,212 @@ const ExercisePicker = ({ onClose, onAdd }) => {
   );
 };
 
-const HistoryDetail = ({ workout, onClose }) => {
+// ─── 1RM HELPER ───
+const get1RMHistory = (name, hist) => {
+  if (!hist?.length) return [];
+  const points = [];
+  for (const session of [...hist].reverse()) {
+    const ex = session.exercises?.find(e => e.name === name);
+    if (ex) {
+      let best = 0;
+      for (const set of (ex.setsData || [])) {
+        if (set.completed && set.weight && set.reps) {
+          const e1rm = calc1RM(set.weight, set.reps);
+          if (e1rm > best) best = e1rm;
+        }
+      }
+      if (best > 0) points.push({ date: session.date, value: best });
+    }
+  }
+  return points;
+};
+
+// ─── PROGRESSION CHART ───
+const ProgressionChart = ({ exerciseName, history, onClose }) => {
+  const points = get1RMHistory(exerciseName, history);
+  if (points.length === 0) return (
+    <div className="fixed inset-0 z-[80] bg-black/30 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="font-bold text-slate-900 text-lg">{exerciseName}</h3>
+          <button onClick={onClose}><X size={22} className="text-slate-400" /></button>
+        </div>
+        <p className="text-sm text-slate-400 text-center py-8">No data yet. Complete some sets to see progression.</p>
+      </div>
+    </div>
+  );
+
+  const values = points.map(p => p.value);
+  const minVal = Math.min(...values);
+  const maxVal = Math.max(...values);
+  const range = maxVal - minVal || 1;
+  const W = 300, H = 160, padX = 10, padY = 20;
+  const chartW = W - padX * 2, chartH = H - padY * 2;
+
+  const pts = points.map((p, i) => ({
+    x: padX + (points.length === 1 ? chartW / 2 : (i / (points.length - 1)) * chartW),
+    y: padY + chartH - ((p.value - minVal) / range) * chartH,
+    ...p
+  }));
+
+  const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+  const area = line + ` L${pts[pts.length - 1].x},${H - padY} L${pts[0].x},${H - padY} Z`;
+
+  const latest = values[values.length - 1];
+  const first = values[0];
+  const change = latest - first;
+  const pct = first > 0 ? ((change / first) * 100).toFixed(1) : 0;
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/30 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-1">
+          <h3 className="font-bold text-slate-900 text-lg">{exerciseName}</h3>
+          <button onClick={onClose}><X size={22} className="text-slate-400" /></button>
+        </div>
+        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">Estimated 1RM Progression</p>
+
+        <div className="flex gap-3 mb-4">
+          <div className="flex-1 bg-violet-50 rounded-xl p-3 text-center border border-violet-100">
+            <div className="text-lg font-black text-violet-600">{latest}kg</div>
+            <div className="text-[9px] font-bold text-violet-400 uppercase">Current</div>
+          </div>
+          <div className="flex-1 bg-slate-50 rounded-xl p-3 text-center border border-slate-100">
+            <div className="text-lg font-black text-slate-700">{maxVal}kg</div>
+            <div className="text-[9px] font-bold text-slate-400 uppercase">Peak</div>
+          </div>
+          <div className={`flex-1 rounded-xl p-3 text-center border ${change >= 0 ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'}`}>
+            <div className={`text-lg font-black ${change >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{change >= 0 ? '+' : ''}{pct}%</div>
+            <div className={`text-[9px] font-bold uppercase ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>Change</div>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 rounded-2xl p-3 border border-slate-100">
+          <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 160 }}>
+            <defs>
+              <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.2" />
+                <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0.02" />
+              </linearGradient>
+            </defs>
+            {/* Grid lines */}
+            {[0, 0.25, 0.5, 0.75, 1].map((f, i) => {
+              const y = padY + chartH * (1 - f);
+              const val = Math.round(minVal + range * f);
+              return (
+                <g key={i}>
+                  <line x1={padX} y1={y} x2={W - padX} y2={y} stroke="#e2e8f0" strokeWidth="0.5" />
+                  <text x={W - padX + 2} y={y + 3} fontSize="8" fill="#94a3b8" fontWeight="bold">{val}</text>
+                </g>
+              );
+            })}
+            {/* Area */}
+            {pts.length > 1 && <path d={area} fill="url(#areaGrad)" />}
+            {/* Line */}
+            {pts.length > 1 && <path d={line} fill="none" stroke="#8b5cf6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />}
+            {/* Dots */}
+            {pts.map((p, i) => (
+              <g key={i}>
+                <circle cx={p.x} cy={p.y} r="4" fill="#8b5cf6" stroke="#fff" strokeWidth="2" />
+              </g>
+            ))}
+          </svg>
+          {/* Date labels */}
+          <div className="flex justify-between mt-1 px-1">
+            <span className="text-[8px] font-bold text-slate-400">{new Date(points[0].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+            {points.length > 1 && <span className="text-[8px] font-bold text-slate-400">{new Date(points[points.length - 1].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>}
+          </div>
+        </div>
+
+        <p className="text-[10px] text-slate-400 text-center mt-3">{points.length} session{points.length !== 1 ? 's' : ''} recorded</p>
+      </div>
+    </div>
+  );
+};
+
+const HistoryDetail = ({ workout, onClose, onContinue, onUpdateWorkout }) => {
   const ic = (n) => isCardio(n);
+  const [editing, setEditing] = useState(false);
+  const [editData, setEditData] = useState(null);
+
+  const startEdit = () => {
+    setEditData(JSON.parse(JSON.stringify(workout)));
+    setEditing(true);
+  };
+  const updateSet = (ei, si, field, value) => {
+    const ne = { ...editData };
+    ne.exercises = ne.exercises.map((ex, i) => i !== ei ? ex : {
+      ...ex, setsData: ex.setsData.map((s, j) => j !== si ? s : { ...s, [field]: value })
+    });
+    setEditData(ne);
+  };
+  const saveEdit = () => {
+    let vol = 0;
+    editData.exercises.forEach(ex => {
+      if (!isCardio(ex.name)) {
+        (ex.setsData || []).forEach(set => {
+          if (set.completed && set.type !== 'W') {
+            vol += (parseFloat(set.weight) || 0) * parseReps(set.reps);
+          }
+        });
+      }
+    });
+    onUpdateWorkout({ ...editData, volume: vol });
+    setEditing(false);
+    setEditData(null);
+  };
+
+  const data = editing ? editData : workout;
+
   return (
     <div className="fixed inset-0 bg-slate-50 z-[60] flex flex-col">
-      <div className="px-4 py-3 bg-white border-b border-gray-100 flex items-center gap-3 sticky top-0 z-10 shadow-sm">
-        <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-800"><ArrowLeft size={22} /></button>
-        <div>
-          <h3 className="text-sm font-bold text-slate-900">{workout.title}</h3>
-          <p className="text-xs text-slate-500">{new Date(workout.date).toLocaleDateString()} • {fmt(workout.duration)}</p>
+      <div className="px-4 py-3 bg-white border-b border-gray-100 flex items-center justify-between sticky top-0 z-10 shadow-sm">
+        <div className="flex items-center gap-3">
+          <button onClick={() => { if (editing) { setEditing(false); setEditData(null); } else onClose(); }} className="p-2 text-slate-400 hover:text-slate-800"><ArrowLeft size={22} /></button>
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">{data.title}{editing && <span className="text-indigo-500 ml-1">(Editing)</span>}</h3>
+            <p className="text-xs text-slate-500">{new Date(data.date).toLocaleDateString()} • {fmt(data.duration)}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {editing ? (
+            <button onClick={saveEdit} className="bg-indigo-600 text-white text-xs font-bold px-4 py-2 rounded-xl active:scale-95">Save</button>
+          ) : (
+            <>
+              <button onClick={startEdit} className="bg-slate-100 text-slate-600 text-xs font-bold px-3 py-2 rounded-xl hover:bg-slate-200"><FileText size={14} className="inline mr-1" />Edit</button>
+              <button onClick={() => onContinue(data)} className="bg-indigo-600 text-white text-xs font-bold px-3 py-2 rounded-xl active:scale-95"><Play size={14} className="inline mr-1" fill="currentColor" />Continue</button>
+            </>
+          )}
         </div>
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 flex justify-between text-center">
-          <div className="flex-1 border-r border-gray-50"><div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Volume</div><div className="text-lg font-black text-indigo-600 mt-1">{(workout.volume / 1000).toFixed(1)}k kg</div></div>
-          <div className="flex-1 border-r border-gray-50"><div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Duration</div><div className="text-lg font-black text-slate-800 mt-1">{Math.floor(workout.duration / 60)} min</div></div>
-          <div className="flex-1"><div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Sets</div><div className="text-lg font-black text-slate-800 mt-1">{workout.exercises.reduce((a, ex) => a + (ex.setsData?.filter(s => s.completed).length || 0), 0)}</div></div>
+          <div className="flex-1 border-r border-gray-50"><div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Volume</div><div className="text-lg font-black text-indigo-600 mt-1">{(data.volume / 1000).toFixed(1)}k kg</div></div>
+          <div className="flex-1 border-r border-gray-50"><div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Duration</div><div className="text-lg font-black text-slate-800 mt-1">{Math.floor(data.duration / 60)} min</div></div>
+          <div className="flex-1"><div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Sets</div><div className="text-lg font-black text-slate-800 mt-1">{data.exercises.reduce((a, ex) => a + (ex.setsData?.filter(s => s.completed).length || 0), 0)}</div></div>
         </div>
-        {workout.exercises.map((ex, i) => (
+        {data.exercises.map((ex, i) => (
           <div key={i} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
             <h4 className="text-sm font-bold text-slate-900 mb-3">{ex.name}</h4>
             <div className="flex justify-between text-[10px] font-extrabold text-slate-300 px-2 mb-2 tracking-widest">
               <span>SET</span><span>{ic(ex.name) ? "DIST" : "KG"}</span><span>{ic(ex.name) ? "TIME" : "REPS"}</span>
             </div>
-            {(ex.setsData || []).filter(s => s.completed).map((set, si) => (
+            {(ex.setsData || []).filter(s => editing || s.completed).map((set, si) => (
               <div key={si} className="flex justify-between items-center text-xs py-2.5 px-2 bg-slate-50 rounded-lg mb-1">
                 <span className="text-slate-400 font-bold w-6 text-center">{si + 1}</span>
-                <span className="font-bold text-slate-800">{set.weight} {ic(ex.name) ? 'km' : 'kg'}</span>
-                <span className="text-slate-600 font-bold">{set.reps}</span>
+                {editing ? (
+                  <>
+                    <input type="number" className="w-16 h-7 rounded-lg text-center text-xs font-bold bg-white border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      value={set.weight} onChange={e => updateSet(i, si, 'weight', e.target.value)} />
+                    <input type="number" className="w-16 h-7 rounded-lg text-center text-xs font-bold bg-white border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      value={set.reps} onChange={e => updateSet(i, si, 'reps', e.target.value)} />
+                  </>
+                ) : (
+                  <>
+                    <span className="font-bold text-slate-800">{set.weight} {ic(ex.name) ? 'km' : 'kg'}</span>
+                    <span className="text-slate-600 font-bold">{set.reps}</span>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -286,7 +476,7 @@ const HistoryDetail = ({ workout, onClose }) => {
 };
 
 // ─── WORKOUT CARD ───
-const WorkoutCard = ({ session, onStart, history }) => (
+const WorkoutCard = ({ session, onStart, history, onShowChart }) => (
   <div className="bg-white rounded-2xl mb-3 overflow-hidden shadow-sm border border-gray-100">
     <div className="flex flex-row">
       <div className="w-1.5 shrink-0" style={{ backgroundColor: sessionColor(session.color) }} />
@@ -316,11 +506,12 @@ const WorkoutCard = ({ session, onStart, history }) => (
                   </div>
                   <span className="text-xs font-mono text-slate-400 bg-slate-50 px-2 py-0.5 rounded shrink-0">{ex.sets}×{ex.reps}</span>
                 </div>
-                {stats && !isCardio(ex.name) && stats.maxW > 0 && (
+                {stats && !isCardio(ex.name) && (stats.maxW > 0 || stats.max1RM > 0) && (
                   <div className="flex items-center mt-1 gap-2">
-                    <span className="flex items-center text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">
+                    {stats.maxW > 0 && <span className="flex items-center text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">
                       <Trophy size={9} className="mr-0.5" />{stats.maxW}kg
-                    </span>
+                    </span>}
+                    {stats.max1RM > 0 && <span onClick={(e) => { e.stopPropagation(); onShowChart?.(ex.name); }} className="text-[10px] text-violet-700 bg-violet-50 px-1.5 py-0.5 rounded border border-violet-100 cursor-pointer hover:bg-violet-100 flex items-center gap-0.5"><TrendingUp size={9} />1RM: {stats.max1RM}kg</span>}
                   </div>
                 )}
               </div>
@@ -333,7 +524,7 @@ const WorkoutCard = ({ session, onStart, history }) => (
 );
 
 // ─── ACTIVE SESSION ───
-const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, history }) => {
+const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, history, onShowChart }) => {
   const { exercises, title, startTime } = data;
   const [timer, setTimer] = useState(0);
   const [showPicker, setShowPicker] = useState(false);
@@ -361,7 +552,7 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
     const set = ne[ei].setsData[si];
     if (set.completed && !isCardio(ne[ei].name)) {
       let d = parseRest(ne[ei].rest);
-      if (set.type === 'F' || (set.rpe && parseInt(set.rpe) >= 9)) d += 30;
+      if (set.type === 'F' || (set.rir !== '' && parseInt(set.rir) <= 1)) d += 30;
       setRestTimer(d);
       setIsResting(true);
     }
@@ -377,7 +568,7 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
   };
   const addSet = (ei) => {
     const ne = [...exercises];
-    ne[ei] = { ...ne[ei], setsData: [...ne[ei].setsData, { weight: '', reps: '', completed: false, type: 'N', rpe: '' }] };
+    ne[ei] = { ...ne[ei], setsData: [...ne[ei].setsData, { weight: '', reps: '', completed: false, type: 'N', rir: '' }] };
     upEx(ne);
   };
   const removeSet = (ei, si) => {
@@ -386,13 +577,13 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
   };
   const addWarmups = (ei) => {
     const ne = [...exercises];
-    const wsets = [{ weight: '', reps: '12', completed: false, type: 'W', rpe: '' }, { weight: '', reps: '8', completed: false, type: 'W', rpe: '' }, { weight: '', reps: '4', completed: false, type: 'W', rpe: '' }];
+    const wsets = [{ weight: '', reps: '12', completed: false, type: 'W', rir: '' }, { weight: '', reps: '8', completed: false, type: 'W', rir: '' }, { weight: '', reps: '4', completed: false, type: 'W', rir: '' }];
     ne[ei] = { ...ne[ei], setsData: [...wsets, ...ne[ei].setsData] };
     upEx(ne);
   };
   const addExercise = (name, category) => {
     const ic = category === "Cardio";
-    upEx([...exercises, { name, category, sets: ic ? 1 : 3, reps: ic ? "30" : "10", rest: "60s", note: "", setsData: Array.from({ length: ic ? 1 : 3 }, () => ({ weight: '', reps: '', completed: false, type: 'N', rpe: '' })) }]);
+    upEx([...exercises, { name, category, sets: ic ? 1 : 3, reps: ic ? "30" : "10", rest: "60s", note: "", setsData: Array.from({ length: ic ? 1 : 3 }, () => ({ weight: '', reps: '', completed: false, type: 'N', rir: '' })) }]);
     setShowPicker(false);
   };
   const deleteExercise = (idx) => { upEx(exercises.filter((_, i) => i !== idx)); };
@@ -459,6 +650,7 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
                     {!ic && <button onClick={() => setRestEdit(i)} className="bg-slate-100 px-2 py-0.5 rounded text-[10px] font-bold text-slate-500 hover:bg-slate-200">{ex.rest}</button>}
                     {ic && <span className="bg-orange-50 text-orange-600 px-2 py-0.5 rounded text-[10px] font-bold">Cardio</span>}
                     {stats?.maxW > 0 && !ic && <span className="flex items-center text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100"><Trophy size={9} className="mr-0.5" />PB: {stats.maxW}kg</span>}
+                    {stats?.max1RM > 0 && !ic && <span onClick={() => onShowChart?.(ex.name)} className="text-[10px] font-bold text-violet-600 bg-violet-50 px-1.5 py-0.5 rounded border border-violet-100 cursor-pointer hover:bg-violet-100 flex items-center gap-0.5"><TrendingUp size={9} />1RM: {stats.max1RM}kg</span>}
                   </div>
                 </div>
               </div>
@@ -474,7 +666,7 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
                 <span className="flex-1 text-[9px] font-extrabold text-slate-300 text-center">PREV</span>
                 <span className="flex-[1.5] text-[9px] font-extrabold text-slate-300 text-center">{ic ? "KM" : "KG"}</span>
                 <span className="flex-[1.5] text-[9px] font-extrabold text-slate-300 text-center">{ic ? "MIN" : "REPS"}</span>
-                {!ic && <span className="w-10 text-[9px] font-extrabold text-slate-300 text-center">RPE</span>}
+                {!ic && <span className="w-10 text-[9px] font-extrabold text-slate-300 text-center">RIR</span>}
                 <span className="w-10"></span>
               </div>
 
@@ -494,7 +686,7 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
                       <input type="number" className={`flex-[1.5] h-9 rounded-lg text-center text-sm font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 ${set.completed ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'} border`}
                         placeholder={prev?.reps || "\u2013"} value={set.reps} onChange={e => updateInput(i, si, 'reps', e.target.value)} />
                       {!ic && <input type="number" className={`w-10 h-9 rounded-lg text-center text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 ${set.completed ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'} border`}
-                        placeholder="\u2013" value={set.rpe || ''} onChange={e => updateInput(i, si, 'rpe', e.target.value)} />}
+                        placeholder="\u2013" value={set.rir || ''} onChange={e => updateInput(i, si, 'rir', e.target.value)} />}
                       <button onClick={() => toggleSet(i, si)}
                         className={`w-10 h-9 rounded-lg flex items-center justify-center shrink-0 ${set.completed ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-300 hover:bg-emerald-100 hover:text-emerald-500'}`}>
                         <Check size={16} strokeWidth={3} />
@@ -579,6 +771,7 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [settings, setSettings] = useState({ profile: 'Home', enableSupersets: true, restCompound: '180', restIsolation: '60' });
   const [ready, setReady] = useState(false);
+  const [chartExercise, setChartExercise] = useState(null);
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -625,7 +818,7 @@ export default function App() {
       title: st.title, startTime: Date.now(),
       exercises: st.exercises.map(ex => ({
         ...ex, note: '',
-        setsData: Array.from({ length: ex.sets }, () => ({ weight: '', reps: '', completed: false, type: 'N', rpe: '' }))
+        setsData: Array.from({ length: ex.sets }, () => ({ weight: '', reps: '', completed: false, type: 'N', rir: '' }))
       }))
     });
     setMinimized(false);
@@ -636,6 +829,15 @@ export default function App() {
   const deleteRoutine = (idx) => { setSavedRoutines(p => p.filter((_, i) => i !== idx)); };
   const finishSession = (d) => { setHistory(p => [d, ...p]); setActiveWorkout(null); setMinimized(false); setView('stats'); };
   const discardSession = () => { setActiveWorkout(null); setMinimized(false); };
+  const continueWorkout = (w) => {
+    setActiveWorkout({ title: w.title, startTime: Date.now(), exercises: w.exercises });
+    setMinimized(false);
+    setSelectedHistory(null);
+  };
+  const updateHistoryWorkout = (updated) => {
+    setHistory(p => p.map(h => h.date === updated.date ? updated : h));
+    setSelectedHistory(updated);
+  };
 
   const getCalDays = () => {
     const now = new Date(), y = now.getFullYear(), m = now.getMonth();
@@ -652,10 +854,11 @@ export default function App() {
   return (
     <div className="flex flex-col w-full max-w-md mx-auto bg-slate-50 border-x border-gray-200 shadow-2xl overflow-hidden relative" style={{ height: '100dvh', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
       {showSettings && <SettingsModal settings={settings} onSave={setSettings} onClose={() => setShowSettings(false)} />}
-      {selectedHistory && <HistoryDetail workout={selectedHistory} onClose={() => setSelectedHistory(null)} />}
+      {chartExercise && <ProgressionChart exerciseName={chartExercise} history={history} onClose={() => setChartExercise(null)} />}
+      {selectedHistory && <HistoryDetail workout={selectedHistory} onClose={() => setSelectedHistory(null)} onContinue={continueWorkout} onUpdateWorkout={updateHistoryWorkout} />}
       {activeWorkout && !minimized && (
         <ActiveSession data={activeWorkout} onUpdate={setActiveWorkout} onMinimize={() => setMinimized(true)}
-          onFinish={finishSession} onDiscard={discardSession} history={history} />
+          onFinish={finishSession} onDiscard={discardSession} history={history} onShowChart={setChartExercise} />
       )}
 
       {/* Header */}
@@ -719,7 +922,7 @@ export default function App() {
               <p className="text-sm text-slate-500">{currentRoutine.description}</p>
               {currentRoutine.type && <span className="inline-block text-[10px] font-bold bg-indigo-50 text-indigo-500 px-2 py-0.5 rounded-md mt-2">{currentRoutine.type}</span>}
             </div>
-            {currentRoutine.sessions?.map((s, i) => <WorkoutCard key={i} session={s} onStart={startSession} history={history} />)}
+            {currentRoutine.sessions?.map((s, i) => <WorkoutCard key={i} session={s} onStart={startSession} history={history} onShowChart={setChartExercise} />)}
           </div>
         )}
 
