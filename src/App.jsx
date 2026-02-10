@@ -3,8 +3,9 @@ import {
   Bot, Send, Settings, Play, Check, ChevronDown, ArrowLeft, Sparkles,
   BarChart2, List, MessageSquare, Bookmark, Trash2, Clock, X, Plus,
   Search, Maximize2, Trophy, FileText, Zap, Bike, Dumbbell,
-  ToggleLeft, ToggleRight, Minus, TrendingUp
+  ToggleLeft, ToggleRight, Minus, TrendingUp, Download, Upload, LogOut, Cloud, CloudOff
 } from 'lucide-react';
+import { firebaseConfigured, signInGoogle, logOut, onAuthChange, cloudSaveData, cloudLoadData } from './firebase';
 
 // ─── EXERCISE DB ───
 const EXERCISE_DB = [
@@ -137,16 +138,62 @@ const parseAIResponse = (raw) => {
 };
 
 // ─── MODALS ───
-const SettingsModal = ({ settings, onSave, onClose }) => {
+const SettingsModal = ({ settings, onSave, onClose, user, onLogin, onLogout, onExport, onImport }) => {
   const [s, setS] = useState(settings);
+  const fileRef = useRef(null);
   return (
     <div className="fixed inset-0 z-[70] bg-black/30 backdrop-blur-sm flex items-center justify-center p-6" onClick={onClose}>
-      <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-6">
           <h3 className="font-bold text-slate-900 text-xl">Preferences</h3>
           <button onClick={onClose} className="bg-slate-50 p-2 rounded-full hover:bg-slate-100"><X size={20} className="text-slate-400" /></button>
         </div>
         <div className="space-y-5">
+          {/* Account */}
+          <div>
+            <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2 block">Account</label>
+            {user ? (
+              <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-200">
+                <div className="flex items-center gap-3 min-w-0">
+                  {user.photoURL ? (
+                    <img src={user.photoURL} className="w-8 h-8 rounded-full shrink-0" referrerPolicy="no-referrer" />
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0"><span className="text-indigo-600 font-bold text-sm">{(user.displayName || user.email || '?')[0]}</span></div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-slate-700 truncate">{user.displayName || 'User'}</div>
+                    <div className="text-[10px] text-emerald-500 font-bold flex items-center gap-1"><Cloud size={10} />Synced</div>
+                  </div>
+                </div>
+                <button onClick={onLogout} className="flex items-center gap-1 text-xs font-bold text-red-500 hover:text-red-600 shrink-0 ml-2"><LogOut size={14} />Sign Out</button>
+              </div>
+            ) : (
+              <button onClick={onLogin}
+                className="w-full flex items-center justify-center gap-2 p-3.5 bg-white border-2 border-slate-200 rounded-2xl hover:border-indigo-300 hover:bg-indigo-50 text-sm font-bold text-slate-700 transition-all">
+                <svg viewBox="0 0 24 24" width="18" height="18"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                Sign in with Google
+              </button>
+            )}
+            {!firebaseConfigured && !user && (
+              <p className="text-[10px] text-amber-500 font-medium mt-2 px-1">Cloud sync not configured. Data saved locally only.</p>
+            )}
+          </div>
+
+          {/* Data Backup */}
+          <div>
+            <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2 block">Data Backup</label>
+            <div className="flex gap-3">
+              <button onClick={onExport} className="flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all">
+                <Download size={16} />Export
+              </button>
+              <button onClick={() => fileRef.current?.click()} className="flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl border border-slate-200 bg-white text-sm font-bold text-slate-600 hover:border-indigo-200 hover:bg-indigo-50 transition-all">
+                <Upload size={16} />Import
+              </button>
+              <input ref={fileRef} type="file" accept=".json" className="hidden" onChange={onImport} />
+            </div>
+          </div>
+
+          {/* Equipment */}
           <div>
             <label className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2 block">Equipment</label>
             <div className="flex gap-3">
@@ -772,7 +819,9 @@ export default function App() {
   const [settings, setSettings] = useState({ profile: 'Home', enableSupersets: true, restCompound: '180', restIsolation: '60' });
   const [ready, setReady] = useState(false);
   const [chartExercise, setChartExercise] = useState(null);
+  const [user, setUser] = useState(null);
   const scrollRef = useRef(null);
+  const cloudSaveTimer = useRef({});
 
   useEffect(() => {
     (async () => {
@@ -788,9 +837,63 @@ export default function App() {
     })();
   }, []);
 
-  useEffect(() => { if (ready) sSet(SK.routines, savedRoutines); }, [savedRoutines, ready]);
-  useEffect(() => { if (ready) sSet(SK.history, history); }, [history, ready]);
-  useEffect(() => { if (ready) sSet(SK.settings, settings); }, [settings, ready]);
+  // Cloud sync helper (debounced)
+  const cloudSync = (key, data) => {
+    if (!user) return;
+    clearTimeout(cloudSaveTimer.current[key]);
+    cloudSaveTimer.current[key] = setTimeout(() => cloudSaveData(user.uid, key, data), 1500);
+  };
+
+  // Auth listener - load cloud data on login
+  useEffect(() => {
+    if (!ready) return;
+    const unsub = onAuthChange(async (firebaseUser) => {
+      setUser(firebaseUser);
+      if (firebaseUser) {
+        const [cr, ch, cs] = await Promise.all([
+          cloudLoadData(firebaseUser.uid, 'routines'),
+          cloudLoadData(firebaseUser.uid, 'history'),
+          cloudLoadData(firebaseUser.uid, 'settings'),
+        ]);
+        if (ch?.length) {
+          setHistory(prev => {
+            const cloudDates = new Set(ch.map(h => h.date));
+            const localOnly = prev.filter(h => !cloudDates.has(h.date));
+            const merged = [...ch, ...localOnly];
+            sSet(SK.history, merged);
+            return merged;
+          });
+        }
+        if (cr?.length) {
+          setSavedRoutines(prev => {
+            const cloudNames = new Set(cr.map(r => r.name));
+            const localOnly = prev.filter(r => !cloudNames.has(r.name));
+            const merged = [...cr, ...localOnly];
+            sSet(SK.routines, merged);
+            return merged;
+          });
+        }
+        if (cs) {
+          setSettings(cs);
+          sSet(SK.settings, cs);
+        }
+        // Push any local-only data to cloud
+        setTimeout(async () => {
+          const latestH = await sGet(SK.history);
+          const latestR = await sGet(SK.routines);
+          const latestS = await sGet(SK.settings);
+          if (latestH) cloudSaveData(firebaseUser.uid, 'history', latestH);
+          if (latestR) cloudSaveData(firebaseUser.uid, 'routines', latestR);
+          if (latestS) cloudSaveData(firebaseUser.uid, 'settings', latestS);
+        }, 2000);
+      }
+    });
+    return unsub;
+  }, [ready]);
+
+  useEffect(() => { if (ready) { sSet(SK.routines, savedRoutines); cloudSync('routines', savedRoutines); } }, [savedRoutines, ready]);
+  useEffect(() => { if (ready) { sSet(SK.history, history); cloudSync('history', history); } }, [history, ready]);
+  useEffect(() => { if (ready) { sSet(SK.settings, settings); cloudSync('settings', settings); } }, [settings, ready]);
   useEffect(() => { if (ready) sSet(SK.chat, messages); }, [messages, ready]);
   useEffect(() => { if (ready) { if (activeWorkout) sSet(SK.draft, activeWorkout); else sDel(SK.draft); } }, [activeWorkout, ready]);
 
@@ -839,6 +942,43 @@ export default function App() {
     setSelectedHistory(updated);
   };
 
+  const handleLogin = async () => {
+    try { await signInGoogle(); } catch (e) { console.error('Login error:', e); }
+  };
+  const handleLogout = async () => {
+    try { await logOut(); setUser(null); } catch (e) { console.error('Logout error:', e); }
+  };
+
+  const exportData = () => {
+    const data = { routines: savedRoutines, history, settings, messages, exportedAt: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `gymai-backup-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const importData = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (data.routines) setSavedRoutines(data.routines);
+        if (data.history) setHistory(data.history);
+        if (data.settings) setSettings(data.settings);
+        if (data.messages) setMessages(data.messages);
+      } catch { alert('Invalid backup file'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const getCalDays = () => {
     const now = new Date(), y = now.getFullYear(), m = now.getMonth();
     const first = new Date(y, m, 1), last = new Date(y, m + 1, 0);
@@ -853,7 +993,8 @@ export default function App() {
 
   return (
     <div className="flex flex-col w-full max-w-md mx-auto bg-slate-50 border-x border-gray-200 shadow-2xl overflow-hidden relative" style={{ height: '100dvh', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
-      {showSettings && <SettingsModal settings={settings} onSave={setSettings} onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsModal settings={settings} onSave={setSettings} onClose={() => setShowSettings(false)}
+        user={user} onLogin={handleLogin} onLogout={handleLogout} onExport={exportData} onImport={importData} />}
       {chartExercise && <ProgressionChart exerciseName={chartExercise} history={history} onClose={() => setChartExercise(null)} />}
       {selectedHistory && <HistoryDetail workout={selectedHistory} onClose={() => setSelectedHistory(null)} onContinue={continueWorkout} onUpdateWorkout={updateHistoryWorkout} />}
       {activeWorkout && !minimized && (
@@ -883,7 +1024,12 @@ export default function App() {
         {/* CHAT */}
         {view === 'chat' && (
           <div className="flex flex-col h-full">
-            <div className="px-4 pb-1.5 flex justify-end">
+            <div className="px-4 pb-1.5 flex justify-end gap-2">
+              {user && (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-500 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full">
+                  <Cloud size={10} />Synced
+                </span>
+              )}
               <button onClick={() => setShowSettings(true)} className="flex items-center gap-1 text-[10px] font-bold text-slate-500 bg-white border border-slate-100 px-2.5 py-1 rounded-full shadow-sm">
                 <Settings size={10} /> {settings.profile}
               </button>
