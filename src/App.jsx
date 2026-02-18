@@ -804,11 +804,11 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
                         {set.type === 'N' ? si + 1 : set.type}
                       </button>
                       <input type="number" inputMode="decimal" className={`flex-1 h-8 rounded-lg text-center text-sm font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 ${set.completed ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'} border min-w-0`}
-                        placeholder="\u2013" value={set.weight} onChange={e => updateInput(i, si, 'weight', e.target.value)} />
+                        placeholder={ic ? "km" : "kg"} value={set.weight} onChange={e => updateInput(i, si, 'weight', e.target.value)} />
                       <input type="number" inputMode="decimal" className={`flex-1 h-8 rounded-lg text-center text-sm font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 ${set.completed ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'} border min-w-0`}
-                        placeholder="\u2013" value={set.reps} onChange={e => updateInput(i, si, 'reps', e.target.value)} />
+                        placeholder={ic ? "min" : "reps"} value={set.reps} onChange={e => updateInput(i, si, 'reps', e.target.value)} />
                       {!ic && <input type="number" inputMode="numeric" className={`w-9 h-8 rounded-lg text-center text-xs font-bold focus:outline-none focus:ring-2 focus:ring-indigo-500 ${set.completed ? 'bg-emerald-50 border-emerald-100' : 'bg-slate-50 border-slate-100'} border`}
-                        placeholder="\u2013" value={set.rir || ''} onChange={e => updateInput(i, si, 'rir', e.target.value)} />}
+                        placeholder="rir" value={set.rir || ''} onChange={e => updateInput(i, si, 'rir', e.target.value)} />}
                       <button onClick={() => toggleSet(i, si)}
                         className={`w-9 h-8 rounded-lg flex items-center justify-center shrink-0 ${set.completed ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-300 hover:bg-emerald-100 hover:text-emerald-500'}`}>
                         <Check size={15} strokeWidth={3} />
@@ -1196,7 +1196,7 @@ export default function App() {
                       {r.type && <span className="text-[10px] font-bold bg-indigo-50 text-indigo-500 px-2 py-0.5 rounded">{r.type}</span>}
                     </div>
                   </div>
-                  <button onClick={e => { e.stopPropagation(); deleteRoutine(i); }} className="p-1.5 text-slate-200 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={16} /></button>
+                  <button onClick={e => { e.stopPropagation(); deleteRoutine(i); }} className="p-1.5 text-slate-200 hover:text-red-500 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity"><Trash2 size={16} /></button>
                 </div>
               </div>
             ))}
