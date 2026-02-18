@@ -4,7 +4,7 @@ import {
   BarChart2, List, MessageSquare, Bookmark, Trash2, Clock, X, Plus,
   Search, Maximize2, Trophy, FileText, Zap, Bike, Dumbbell,
   ToggleLeft, ToggleRight, Minus, TrendingUp, Download, Upload, LogOut, Cloud, CloudOff,
-  RefreshCw
+  RefreshCw, Scale
 } from 'lucide-react';
 import { firebaseConfigured, signInGoogle, logOut, onAuthChange, cloudSaveData, cloudLoadData } from './firebase';
 
@@ -209,7 +209,7 @@ const DEFAULT_EQUIPMENT = [
 ];
 
 // ─── STORAGE (localStorage) ───
-const SK = { routines: "gym-routines", history: "gym-history", settings: "gym-settings", draft: "gym-draft", chat: "gym-chat" };
+const SK = { routines: "gym-routines", history: "gym-history", settings: "gym-settings", draft: "gym-draft", chat: "gym-chat", weight: "gym-weight" };
 const sGet = async (k) => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch { return null; } };
 const sSet = async (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.error(e); } };
 const sDel = async (k) => { try { localStorage.removeItem(k); } catch {} };
@@ -242,6 +242,66 @@ const getExStats = (name, hist) => {
   return (maxW === 0 && !lastDate) ? null : { maxW, max1RM, lastDate, lastSets };
 };
 
+// ─── AI DATA SUMMARY ───
+const buildUserDataSummary = (history, weightLog) => {
+  if (!history?.length && !weightLog?.length) return '';
+  const parts = [];
+  if (history?.length) {
+    const recent = history.slice(0, 8);
+    parts.push('RECENT WORKOUTS (newest first):');
+    recent.forEach(s => {
+      const exNames = s.exercises?.map(e => e.name).join(', ') || 'none';
+      const sets = s.exercises?.reduce((a, ex) => a + (ex.setsData?.filter(st => st.completed).length || 0), 0) || 0;
+      parts.push(`- ${s.title} (${new Date(s.date).toLocaleDateString()}): ${sets} sets, ${(s.volume / 1000).toFixed(1)}k kg vol, ${Math.floor(s.duration / 60)}min [${exNames}]`);
+    });
+    const now = Date.now();
+    const weeks = [0, 0, 0, 0];
+    history.forEach(h => {
+      const age = (now - new Date(h.date).getTime()) / (7 * 86400000);
+      if (age < 1) weeks[0]++;
+      else if (age < 2) weeks[1]++;
+      else if (age < 3) weeks[2]++;
+      else if (age < 4) weeks[3]++;
+    });
+    parts.push(`\nTRAINING FREQUENCY (last 4 weeks): ${weeks.join(', ')} sessions/week (newest to oldest)`);
+    const exMap = {};
+    history.forEach(s => {
+      s.exercises?.forEach(ex => {
+        if (isCardio(ex.name)) return;
+        if (!exMap[ex.name]) exMap[ex.name] = { vol: 0, maxW: 0, max1RM: 0, count: 0 };
+        exMap[ex.name].count++;
+        (ex.setsData || []).forEach(set => {
+          if (set.completed && set.type !== 'W') {
+            const w = parseFloat(set.weight) || 0;
+            const r = parseReps(set.reps);
+            exMap[ex.name].vol += w * r;
+            if (w > exMap[ex.name].maxW) exMap[ex.name].maxW = w;
+            const e1rm = calc1RM(set.weight, set.reps);
+            if (e1rm > exMap[ex.name].max1RM) exMap[ex.name].max1RM = e1rm;
+          }
+        });
+      });
+    });
+    const top = Object.entries(exMap).sort((a, b) => b[1].vol - a[1].vol).slice(0, 8);
+    if (top.length) {
+      parts.push('\nTOP EXERCISES (by total volume):');
+      top.forEach(([name, d]) => {
+        parts.push(`- ${name}: ${(d.vol / 1000).toFixed(1)}k kg total, PB ${d.maxW}kg, e1RM ${d.max1RM}kg, ${d.count} sessions`);
+      });
+    }
+  }
+  if (weightLog?.length) {
+    const sorted = [...weightLog].sort((a, b) => a.date.localeCompare(b.date));
+    const last5 = sorted.slice(-5);
+    const current = last5[last5.length - 1];
+    const direction = last5.length >= 2
+      ? (last5[last5.length - 1].weight > last5[0].weight ? 'trending up' : last5[last5.length - 1].weight < last5[0].weight ? 'trending down' : 'stable')
+      : 'insufficient data';
+    parts.push(`\nBODY WEIGHT: Current ${current.weight}kg (${current.date}). Recent: ${last5.map(w => `${w.weight}kg`).join(' -> ')}. Trend: ${direction}.`);
+  }
+  return parts.length ? '\n\nUSER TRAINING DATA:\n' + parts.join('\n') : '';
+};
+
 // ─── AI ───
 const SYSTEM = `You are GymAI, an expert physique coach. You help design training routines and give coaching advice.
 
@@ -252,6 +312,8 @@ BEHAVIOUR:
 1. Chat naturally about goals, schedule, experience, injuries.
 2. When you have enough info OR user asks for a routine, include a routine in your response.
 3. For normal conversation, just reply text.
+4. You have access to the user's training data summary below. Use it to answer questions about progression, volume trends, frequency, body weight changes, and to make evidence-based suggestions.
+5. When analyzing data, be specific - reference actual numbers, dates, and trends from the data provided.
 
 WHEN INCLUDING A ROUTINE, embed exactly one JSON block wrapped in <routine> tags:
 <routine>
@@ -260,11 +322,12 @@ WHEN INCLUDING A ROUTINE, embed exactly one JSON block wrapped in <routine> tags
 
 Keep the JSON compact. Only use <routine> tags when actually proposing a saveable routine. Otherwise just chat. Be concise and practical.`;
 
-const callAI = async (messages, settings) => {
+const callAI = async (messages, settings, history, weightLog) => {
   const equipCtx = settings.equipment?.length
     ? `Equipment available: ${settings.equipment.join(', ')}.`
     : "Equipment: Not specified.";
   const settingsCtx = `${equipCtx} Supersets: ${settings.enableSupersets ? 'Yes' : 'No'}. Rest: ${settings.restCompound}s compound, ${settings.restIsolation}s isolation.`;
+  const dataSummary = buildUserDataSummary(history, weightLog);
 
   const apiMsgs = [];
   for (const m of messages) {
@@ -294,7 +357,7 @@ const callAI = async (messages, settings) => {
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
-        system: SYSTEM + "\n\nUser settings: " + settingsCtx,
+        system: SYSTEM + "\n\nUser settings: " + settingsCtx + dataSummary,
         messages: apiMsgs
       }),
       signal: ctrl.signal
@@ -660,6 +723,71 @@ const ProgressionChart = ({ exerciseName, history, onClose }) => {
   );
 };
 
+// ─── BODY WEIGHT CHART ───
+const WeightChart = ({ weightLog }) => {
+  if (!weightLog?.length || weightLog.length < 2) return null;
+  const sorted = [...weightLog].sort((a, b) => a.date.localeCompare(b.date));
+  const values = sorted.map(p => p.weight);
+  const minVal = Math.min(...values) - 0.5;
+  const maxVal = Math.max(...values) + 0.5;
+  const range = maxVal - minVal || 1;
+  const W = 300, H = 140, padX = 10, padY = 20;
+  const chartW = W - padX * 2, chartH = H - padY * 2;
+  const pts = sorted.map((p, i) => ({
+    x: padX + (sorted.length === 1 ? chartW / 2 : (i / (sorted.length - 1)) * chartW),
+    y: padY + chartH - ((p.weight - minVal) / range) * chartH,
+    ...p
+  }));
+  const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
+  const area = line + ` L${pts[pts.length - 1].x},${H - padY} L${pts[0].x},${H - padY} Z`;
+  const latest = values[values.length - 1];
+  const first = values[0];
+  const change = latest - first;
+
+  return (
+    <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm">
+      <div className="flex justify-between items-center mb-3">
+        <div>
+          <span className="text-lg font-black text-slate-800">{latest}</span>
+          <span className="text-sm font-bold text-slate-400 ml-1">kg</span>
+        </div>
+        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${change <= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+          {change >= 0 ? '+' : ''}{change.toFixed(1)} kg
+        </span>
+      </div>
+      <div className="bg-slate-50 rounded-xl p-2 border border-slate-100">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 120 }}>
+          <defs>
+            <linearGradient id="weightAreaGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#6366f1" stopOpacity="0.15" />
+              <stop offset="100%" stopColor="#6366f1" stopOpacity="0.02" />
+            </linearGradient>
+          </defs>
+          {[0, 0.5, 1].map((f, i) => {
+            const y = padY + chartH * (1 - f);
+            const val = (minVal + range * f).toFixed(1);
+            return (
+              <g key={i}>
+                <line x1={padX} y1={y} x2={W - padX} y2={y} stroke="#e2e8f0" strokeWidth="0.5" />
+                <text x={W - padX + 2} y={y + 3} fontSize="7" fill="#94a3b8" fontWeight="bold">{val}</text>
+              </g>
+            );
+          })}
+          <path d={area} fill="url(#weightAreaGrad)" />
+          <path d={line} fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          {pts.map((p, i) => (
+            <circle key={i} cx={p.x} cy={p.y} r="3" fill="#6366f1" stroke="#fff" strokeWidth="1.5" />
+          ))}
+        </svg>
+        <div className="flex justify-between mt-1 px-1">
+          <span className="text-[8px] font-bold text-slate-400">{new Date(sorted[0].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+          <span className="text-[8px] font-bold text-slate-400">{new Date(sorted[sorted.length - 1].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const HistoryDetail = ({ workout, onClose, onContinue, onUpdateWorkout }) => {
   const ic = (n) => isCardio(n);
   const [editing, setEditing] = useState(false);
@@ -802,7 +930,7 @@ const WorkoutCard = ({ session, onStart, history, onShowChart }) => (
 );
 
 // ─── ACTIVE SESSION ───
-const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, history, onShowChart }) => {
+const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, history, onShowChart, weightLog, onLogWeight }) => {
   const { exercises, title, startTime } = data;
   const [timer, setTimer] = useState(0);
   const [showPicker, setShowPicker] = useState(false);
@@ -811,6 +939,10 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
   const [restEndTime, setRestEndTime] = useState(null);
   const [restDisplay, setRestDisplay] = useState(0);
   const [swapIdx, setSwapIdx] = useState(null);
+  const todayStr = new Date().toISOString().split('T')[0];
+  const todayWeight = weightLog?.find(e => e.date === todayStr);
+  const [weightInput, setWeightInput] = useState(todayWeight?.weight?.toString() || '');
+  const [weightDismissed, setWeightDismissed] = useState(!!todayWeight);
 
   // Workout timer - survives background/screen-off via Date.now() diff
   useEffect(() => {
@@ -945,6 +1077,22 @@ const ActiveSession = ({ data, onUpdate, onMinimize, onFinish, onDiscard, histor
           ))}
         </div>
 
+        {!weightDismissed && (
+          <div className="bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-2xl p-3 flex items-center gap-3">
+            <Scale size={18} className="text-violet-500 shrink-0" />
+            <input type="number" inputMode="decimal"
+              className="w-20 h-8 rounded-lg text-center text-sm font-bold bg-white border border-violet-200 focus:ring-2 focus:ring-violet-500 outline-none"
+              placeholder="kg" value={weightInput} onChange={e => setWeightInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && weightInput) { onLogWeight(weightInput); setWeightDismissed(true); } }} />
+            <span className="text-xs font-bold text-violet-600 min-w-0">Body weight</span>
+            <div className="flex-1" />
+            <button onClick={() => { if (weightInput && parseFloat(weightInput) > 0) onLogWeight(weightInput); setWeightDismissed(true); }}
+              className="bg-violet-600 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg active:scale-95 shrink-0">
+              {weightInput ? 'Save' : 'Skip'}
+            </button>
+          </div>
+        )}
+
         {exercises.map((ex, i) => {
           const stats = getExStats(ex.name, history);
           const ic = isCardio(ex.name);
@@ -1071,6 +1219,7 @@ export default function App() {
   const [minimized, setMinimized] = useState(false);
   const [savedRoutines, setSavedRoutines] = useState([]);
   const [history, setHistory] = useState([]);
+  const [weightLog, setWeightLog] = useState([]);
   const [settings, setSettings] = useState({ equipment: DEFAULT_EQUIPMENT, enableSupersets: true, restCompound: '180', restIsolation: '60' });
   const [ready, setReady] = useState(false);
   const [chartExercise, setChartExercise] = useState(null);
@@ -1081,14 +1230,15 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [r, h, s, d, c] = await Promise.all([
-        sGet(SK.routines), sGet(SK.history), sGet(SK.settings), sGet(SK.draft), sGet(SK.chat)
+      const [r, h, s, d, c, w] = await Promise.all([
+        sGet(SK.routines), sGet(SK.history), sGet(SK.settings), sGet(SK.draft), sGet(SK.chat), sGet(SK.weight)
       ]);
       if (r) setSavedRoutines(r);
       if (h) setHistory(h);
       if (s) setSettings(prev => ({ ...prev, ...s, equipment: s.equipment || DEFAULT_EQUIPMENT }));
       if (d) { setActiveWorkout(d); setMinimized(true); }
       if (c?.length) setMessages(c);
+      if (w) setWeightLog(w);
       setReady(true);
     })();
   }, []);
@@ -1106,10 +1256,11 @@ export default function App() {
     const unsub = onAuthChange(async (firebaseUser) => {
       setUser(firebaseUser);
       if (firebaseUser) {
-        const [cr, ch, cs] = await Promise.all([
+        const [cr, ch, cs, cw] = await Promise.all([
           cloudLoadData(firebaseUser.uid, 'routines'),
           cloudLoadData(firebaseUser.uid, 'history'),
           cloudLoadData(firebaseUser.uid, 'settings'),
+          cloudLoadData(firebaseUser.uid, 'weight'),
         ]);
         if (ch?.length) {
           setHistory(prev => {
@@ -1133,14 +1284,25 @@ export default function App() {
           setSettings(prev => ({ ...prev, ...cs, equipment: cs.equipment || DEFAULT_EQUIPMENT }));
           sSet(SK.settings, cs);
         }
+        if (cw?.length) {
+          setWeightLog(prev => {
+            const cloudDates = new Set(cw.map(w => w.date));
+            const localOnly = prev.filter(w => !cloudDates.has(w.date));
+            const merged = [...cw, ...localOnly].sort((a, b) => a.date.localeCompare(b.date));
+            sSet(SK.weight, merged);
+            return merged;
+          });
+        }
         // Push any local-only data to cloud
         setTimeout(async () => {
           const latestH = await sGet(SK.history);
           const latestR = await sGet(SK.routines);
           const latestS = await sGet(SK.settings);
+          const latestW = await sGet(SK.weight);
           if (latestH) cloudSaveData(firebaseUser.uid, 'history', latestH);
           if (latestR) cloudSaveData(firebaseUser.uid, 'routines', latestR);
           if (latestS) cloudSaveData(firebaseUser.uid, 'settings', latestS);
+          if (latestW) cloudSaveData(firebaseUser.uid, 'weight', latestW);
         }, 2000);
       }
     });
@@ -1150,6 +1312,7 @@ export default function App() {
   useEffect(() => { if (ready) { sSet(SK.routines, savedRoutines); cloudSync('routines', savedRoutines); } }, [savedRoutines, ready]);
   useEffect(() => { if (ready) { sSet(SK.history, history); cloudSync('history', history); } }, [history, ready]);
   useEffect(() => { if (ready) { sSet(SK.settings, settings); cloudSync('settings', settings); } }, [settings, ready]);
+  useEffect(() => { if (ready) { sSet(SK.weight, weightLog); cloudSync('weight', weightLog); } }, [weightLog, ready]);
   useEffect(() => { if (ready) sSet(SK.chat, messages); }, [messages, ready]);
   useEffect(() => { if (ready) { if (activeWorkout) sSet(SK.draft, activeWorkout); else sDel(SK.draft); } }, [activeWorkout, ready]);
 
@@ -1164,7 +1327,7 @@ export default function App() {
     setMessages(newMsgs);
     setLoading(true);
 
-    const raw = await callAI(newMsgs, settings);
+    const raw = await callAI(newMsgs, settings, history, weightLog);
     const { text, routine, rawText } = parseAIResponse(raw);
 
     const aiMsg = { id: Date.now() + 1, sender: 'ai', text, routine, rawText };
@@ -1225,7 +1388,7 @@ export default function App() {
   };
 
   const exportData = () => {
-    const data = { routines: savedRoutines, history, settings, messages, exportedAt: new Date().toISOString() };
+    const data = { routines: savedRoutines, history, settings, messages, weightLog, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1248,6 +1411,7 @@ export default function App() {
         if (data.history) setHistory(data.history);
         if (data.settings) setSettings(data.settings);
         if (data.messages) setMessages(data.messages);
+        if (data.weightLog) setWeightLog(data.weightLog);
       } catch { alert('Invalid backup file'); }
     };
     reader.readAsText(file);
@@ -1275,7 +1439,14 @@ export default function App() {
       {selectedHistory && <HistoryDetail workout={selectedHistory} onClose={() => setSelectedHistory(null)} onContinue={continueWorkout} onUpdateWorkout={updateHistoryWorkout} />}
       {activeWorkout && !minimized && (
         <ActiveSession data={activeWorkout} onUpdate={setActiveWorkout} onMinimize={() => setMinimized(true)}
-          onFinish={finishSession} onDiscard={discardSession} history={history} onShowChart={setChartExercise} />
+          onFinish={finishSession} onDiscard={discardSession} history={history} onShowChart={setChartExercise}
+          weightLog={weightLog} onLogWeight={(w) => {
+            const entry = { date: new Date().toISOString().split('T')[0], weight: parseFloat(w) };
+            setWeightLog(prev => {
+              const filtered = prev.filter(e => e.date !== entry.date);
+              return [...filtered, entry].sort((a, b) => a.date.localeCompare(b.date));
+            });
+          }} />
       )}
 
       {/* Header */}
@@ -1410,6 +1581,13 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {weightLog.length >= 2 && (
+              <div className="mb-6">
+                <h3 className="text-[10px] font-extrabold text-slate-400 mb-3 uppercase tracking-widest px-1">Body Weight</h3>
+                <WeightChart weightLog={weightLog} />
+              </div>
+            )}
 
             <h3 className="text-[10px] font-extrabold text-slate-400 mb-3 uppercase tracking-widest px-1">Recent Workouts</h3>
             {history.length === 0 ? (
